@@ -1,0 +1,59 @@
+{
+  "label": "Deterministic mechanics benchmark; not a model quality benchmark",
+  "runs": [
+    {
+      "strategy": "workflow",
+      "mode": "fixture",
+      "success": true,
+      "approval_resume_seconds": 0.24592329999723006,
+      "reported_model_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "seconds": 0.6912893999979133
+    },
+    {
+      "strategy": "workflow",
+      "mode": "fixture",
+      "success": true,
+      "approval_resume_seconds": 0.20993260000250302,
+      "reported_model_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "seconds": 0.5698456000027363
+    },
+    {
+      "strategy": "workflow",
+      "mode": "fixture",
+      "success": true,
+      "approval_resume_seconds": 0.16452700000081677,
+      "reported_model_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "seconds": 0.5188115999990259
+    },
+    {
+      "strategy": "workflow",
+      "mode": "fixture",
+      "success": true,
+      "approval_resume_seconds": 0.1851613999970141,
+      "reported_model_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "seconds": 0.5452320000040345
+    },
+    {
+      "strategy": "workflow",
+      "mode": "fixture",
+      "success": true,
+      "approval_resume_seconds": 0.16974589999881573,
+      "reported_model_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "seconds": 0.5261584000036237
+    }
+  ],
+  "success_rate": 1.0,
+  "p50_seconds": 0.5452320000040345,
+  "p95_seconds": 0.6912893999979133,
+  "quality_improvement": "Not established; requires blinded human evaluation on representative real documents"
+}

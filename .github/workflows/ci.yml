@@ -1,0 +1,90 @@
+name: Verify
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      OTEL_SDK_DISABLED: 'true'
+      CREWAI_TELEMETRY_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.2', python-version: '3.13'}
+      - run: uv sync --frozen --extra crew
+      - run: uv run ruff check apps/api tests scripts
+      - run: uv run ruff format --check apps/api tests scripts
+      - run: uv run mypy apps/api/relay
+      - run: uv run pytest --cov=relay --cov-report=xml
+      - run: uv build
+      - name: Audit default production runtime (required)
+        run: |
+          uv export --frozen --no-dev --no-emit-project --output-file runtime-requirements.txt > /dev/null
+          uv run pip-audit -r runtime-requirements.txt --disable-pip --no-deps --require-hashes
+      - name: Report optional CrewAI dependency advisories
+        continue-on-error: true
+        run: uv run pip-audit --skip-editable --format json --output optional-crew-audit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: optional-crew-security-report, path: optional-crew-audit.json}
+      - uses: actions/upload-artifact@v4
+        with: {name: backend-coverage, path: coverage.xml}
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: {version: '10.24.0'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '24', cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml}
+      - run: pnpm --dir apps/web install --frozen-lockfile
+      - run: pnpm --dir apps/web typecheck
+      - run: pnpm --dir apps/web test
+      - run: pnpm --dir apps/web build
+      - run: pnpm --dir apps/web audit --prod --audit-level high
+      - uses: actions/upload-artifact@v4
+        with: {name: web-build, path: apps/web/dist}
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: {POSTGRES_USER: relay, POSTGRES_PASSWORD: ci-only, POSTGRES_DB: relay}
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U relay" --health-interval 5s --health-retries 10
+    env:
+      RELAY_DATABASE_URL: postgresql+psycopg://relay:ci-only@localhost:5432/relay
+      RELAY_CHECKPOINT_URL: postgresql://relay:ci-only@localhost:5432/relay
+      OTEL_SDK_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {version: '0.12.2', python-version: '3.13'}
+      - uses: pnpm/action-setup@v4
+        with: {version: '10.24.0'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: uv sync --frozen
+      - name: Verify PostgreSQL approval race and retention
+        env:
+          RELAY_TEST_POSTGRES_URL: postgresql+psycopg://relay:ci-only@localhost:5432/relay
+        run: uv run pytest tests/test_postgres.py -q
+      - run: pnpm --dir apps/web install --frozen-lockfile
+      - run: pnpm --dir apps/web exec playwright install --with-deps chromium
+      - name: Start services and verify browser flow on PostgreSQL
+        run: |
+          uv run uvicorn relay.api:app --host 127.0.0.1 --port 8000 >api.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://localhost:8000/api/health && break || sleep 2; done
+          uv run python -m relay.worker >worker.log 2>&1 &
+          pnpm --dir apps/web test:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: integration-diagnostics, path: 'apps/web/test-results/' }
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/setup-sam@v2
+      - run: sam validate --lint --template-file infra/aws/template.yaml
+      - run: docker compose config --quiet

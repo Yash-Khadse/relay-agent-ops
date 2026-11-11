@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Relay opt-in bounded API and worker; external PostgreSQL required. NOT permanently free.
+Parameters:
+  EnableResources:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable only after verifying account eligibility, credits, quotas and cost controls.
+  DatabaseUrl:
+    Type: String
+    NoEcho: true
+    Default: ''
+  CheckpointUrl:
+    Type: String
+    NoEcho: true
+    Default: ''
+  FrontendOrigin:
+    Type: String
+    Default: https://example.invalid
+  Model:
+    Type: String
+    Default: ''
+  Provider:
+    Type: String
+    Default: fixture
+    AllowedValues: [fixture, groq, gemini]
+  ModelApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+Conditions:
+  Enabled: !Equals [!Ref EnableResources, 'true']
+Globals:
+  Function:
+    Architectures: [x86_64]
+    MemorySize: 512
+    Timeout: 30
+    Environment:
+      Variables:
+        RELAY_DATABASE_URL: !Ref DatabaseUrl
+        RELAY_CHECKPOINT_URL: !Ref CheckpointUrl
+        RELAY_PROVIDER: !Ref Provider
+        RELAY_MODEL: !Ref Model
+        RELAY_API_KEY: !Ref ModelApiKey
+        RELAY_COOKIE_SECURE: 'true'
+        RELAY_CORS_ORIGINS: !Sub '["${FrontendOrigin}"]'
+        RELAY_GLOBAL_DAILY_EXECUTIONS: '20'
+        RELAY_MAX_EXECUTIONS: '3'
+        RELAY_DATA_DIR: /tmp/relay
+Resources:
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Condition: Enabled
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 5
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Condition: Enabled
+    Metadata: {Dockerfile: infra/aws/Dockerfile, DockerContext: ../.., DockerTag: relay-api}
+    Properties:
+      PackageType: Image
+      ReservedConcurrentExecutions: 2
+      ImageConfig: {Command: [relay.cloud.api_handler]}
+      Events:
+        Root:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: '/', Method: GET}
+        All:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: '/{proxy+}', Method: ANY}
+  Queue:
+    Type: AWS::SQS::Queue
+    Condition: Enabled
+    Properties:
+      VisibilityTimeout: 1800
+      MessageRetentionPeriod: 86400
+      SqsManagedSseEnabled: true
+      RedrivePolicy: {deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn, maxReceiveCount: 3}
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Condition: Enabled
+    Properties: {MessageRetentionPeriod: 345600, SqsManagedSseEnabled: true}
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Condition: Enabled
+    Metadata: {Dockerfile: infra/aws/Dockerfile, DockerContext: ../.., DockerTag: relay-worker}
+    Properties:
+      PackageType: Image
+      Timeout: 300
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 2
+      ImageConfig: {Command: [relay.cloud.worker_handler]}
+      Policies:
+        - SQSPollerPolicy: {QueueName: !GetAtt Queue.QueueName}
+      Events:
+        Work:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Queue.Arn
+            BatchSize: 1
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            ScalingConfig: {MaximumConcurrency: 2}
+  DispatcherFunction:
+    Type: AWS::Serverless::Function
+    Condition: Enabled
+    Metadata: {Dockerfile: infra/aws/Dockerfile, DockerContext: ../.., DockerTag: relay-dispatcher}
+    Properties:
+      PackageType: Image
+      ReservedConcurrentExecutions: 1
+      ImageConfig: {Command: [relay.cloud.dispatcher_handler]}
+      Environment:
+        Variables:
+          RELAY_SQS_QUEUE_URL: !Ref Queue
+      Policies:
+        - SQSSendMessagePolicy: {QueueName: !GetAtt Queue.QueueName}
+      Events:
+        Sweep:
+          Type: Schedule
+          Properties: {Schedule: 'rate(1 minute)', Enabled: true}
+  ApiLogs:
+    Type: AWS::Logs::LogGroup
+    Condition: Enabled
+    Properties: {LogGroupName: !Sub '/aws/lambda/${ApiFunction}', RetentionInDays: 7}
+  WorkerLogs:
+    Type: AWS::Logs::LogGroup
+    Condition: Enabled
+    Properties: {LogGroupName: !Sub '/aws/lambda/${WorkerFunction}', RetentionInDays: 7}
+  DispatcherLogs:
+    Type: AWS::Logs::LogGroup
+    Condition: Enabled
+    Properties: {LogGroupName: !Sub '/aws/lambda/${DispatcherFunction}', RetentionInDays: 7}
+Outputs:
+  ApiUrl:
+    Condition: Enabled
+    Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.amazonaws.com'
