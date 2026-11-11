@@ -4,6 +4,75 @@ Relay is a human-supervised workflow operations application. It turns a brief an
 
 The default experience is an explicitly labeled **deterministic integration demo**. It exercises persistence, branching, approval, revisions, and export without model inference or paid credentials. Live providers and bounded CrewAI research are opt-in.
 
+## Architecture
+
+Relay separates the browser UI, FastAPI control plane, durable job outbox, LangGraph checkpointed execution, and validated model calls so human approval pauses never tie up HTTP requests or worker processes.
+
+### System overview
+
+```mermaid
+flowchart TB
+  subgraph Client["Frontend - apps/web"]
+    UI["React + TypeScript UI (TanStack Query, XYFlow, Cursor Polling)"]
+  end
+
+  subgraph Control["API and Persistence - apps/api/relay"]
+    API["FastAPI Control Plane (Auth, Runs, Approvals, Artifacts)"]
+    DB[("Metadata DB: SQLite or PostgreSQL (Outbox, Approvals, Artifacts, Events)")]
+  end
+
+  subgraph Runtime["Durable Worker and Graph Execution"]
+    Worker["Worker (Fenced Leases and Execution Locks)"]
+    Graph["LangGraph v1.0 Engine (Checkpointed State and Exact-Draft Hash Check)"]
+    CP[("LangGraph Checkpoints: SQLite or PostgreSQL")]
+  end
+
+  subgraph Models["Validated Model Boundary - providers.py and crew.py"]
+    Provider["Budgeted Provider (Pydantic JSON and Usage Reservations)"]
+    Fixture["Deterministic Fixture (Default Demo)"]
+    Live["Ollama / Groq / Gemini (Opt-in)"]
+    Crew["CrewAI Research Collaboration (Opt-in, Bounded)"]
+  end
+
+  UI <-->|"Same-origin /api + HttpOnly cookie"| API
+  API -->|"Transactional runs, approvals, and job outbox"| DB
+  DB -->|"Claims queued or lease-expired jobs"| Worker
+  Worker -->|"Invokes or resumes workflow"| Graph
+  Worker -->|"Materializes pending approvals and status"| DB
+  Graph <-->|"Saves and restores checkpoints"| CP
+  Graph -->|"Verifies approval hash and exports artifacts"| DB
+  Graph -->|"Structured generation"| Provider
+  Graph -.->|"Optional in research node"| Crew
+  Crew -->|"Bounded LLM calls"| Provider
+  Provider --> Fixture
+  Provider --> Live
+```
+
+### Workflow and approval pipeline
+
+All workflow templates execute on versioned LangGraph `1.0` with parallel `analysis` and `risk` branches, bounded revision loops, and an `interrupt()` gate that requires an exact-draft hash match before finalization:
+
+```mermaid
+flowchart LR
+  Start(["Start"]) --> Plan["plan (supervisor)"]
+  Plan --> Research["research"]
+  Research --> Analysis["analysis"]
+  Research --> Risk["risk"]
+  Analysis --> Draft["draft (writer)"]
+  Risk --> Draft
+  Draft --> Review["review (reviewer)"]
+  Review -->|"Issues & budget left"| Revise["revise (writer)"]
+  Revise --> Draft
+  Review -->|"Pass or budget used"| Approval{"approval (interrupt)"}
+  Approval -->|"revise"| Revise
+  Approval -->|"approve + hash match"| Finalize["finalize (artifact + local ticket)"]
+  Approval -->|"reject"| Reject["reject"]
+  Finalize --> Done(["End"])
+  Reject --> Done
+```
+
+Runs locally with SQLite (`scripts/dev.ps1`), via Docker Compose + PostgreSQL ([compose.yaml](compose.yaml)), or through the opt-in AWS SAM serverless path ([AWS_ARCHITECTURE.md](AWS_ARCHITECTURE.md)). See [ARCHITECTURE.md](ARCHITECTURE.md) for the approval sequence diagram, execution state machine, and locking details.
+
 ## Start locally on Windows
 
 Prerequisites: Python 3.13 (package supports 3.12–3.13), uv, Node 24, and pnpm 10.24.0. From the repository root:
